@@ -1,0 +1,842 @@
+---
+title: "National Happiness Level under Data Science perspective"
+author: "Nguyen 22317009 - Coffee 21886207 - Thai - Sophie - Sarad"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+# STATEMENT
+In today’s data-driven world, understand the elements which contribute to the happiness of a country is crucial. Therefore, develop supervised learning models to indicate the key socio-economic and governance enable to forecast the country's happiness score and the factors which directly affects the predictions.
+
+# 1.Data Loading and Exploration
+## 1.1 Data Loading
+```{r}
+library(ggplot2)
+library(glmnet)
+library(tidyverse)
+library(corrplot)
+library(dplyr)
+library(pROC)
+library(reshape2)
+```
+
+```{r}
+df <- read.csv('happiness.csv')
+dim(df)
+```
+
+## 1.2 Data Exploration
+### 1.2.1 Dataset Overview
+```{r}
+head(df)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+summary(df)
+```
+
+### 1.2.2 Top 10 countries with highest average Life Ladder
+- spread of `Life Ladder` values. The distance between the median Life Ladder value of Finland to the third quartile is evidently large. This implies that a large majority of the Life Ladder in Finland is ranked greater than the median value. Thus, happiness is ranked consistently high in Finland.
+- Denmark stands out as having both high median life satisfaction and remarkable consistency (very tight box plot with minimal variation)
+- Most countries cluster around 7.4-7.6 on the scale, suggesting these top-performing nations have relatively similar average life satisfaction levels
+- Variation differs significantly between countries - some like Iceland and Switzerland show tight distributions (indicating consistent happiness across their populations), while others like Denmark and Finland show more spread
+- No country reaches 8.0 consistently, indicating there may be a practical ceiling to measured life satisfaction even in the world's happiest places
+
+```{r}
+avg.ll <- aggregate(df$Life.Ladder ~ 
+                    df$Country.name, 
+                    data=df, 
+                    FUN=mean)
+
+# Removes "df$" from the column names
+names(avg.ll) <- gsub("df\\$", "", names(avg.ll))
+
+
+
+top10 <- head(avg.ll[order(-avg.ll$Life.Ladder), ], 10)
+
+# Subset original data to just those countries
+hap_top10 <- merge(df, top10, by = "Country.name")
+
+# Boxplot for top 10
+boxplot(Life.Ladder.x ~ Country.name, data = hap_top10,
+        las = 2,
+        cex.axis = 0.7,
+        col = "red",
+        main = "Average Life Ladder in Top 10 Countries",
+        xlab = "Country",
+        ylab = "Life Ladder Score") 
+
+```
+
+
+### 1.2.3 Average Life Ladder per Year
+- The average `life ladder` in 2005 ranked over 6.4 and dropped in 2006 by 1.2. Since then, there has been a steady increase and has ranged consistently between 5.2 to 5.6.
+
+- Sharp decline from 2005-2006: There's a steep fall from about 6.4 to around 5.2, representing a significant drop in global life satisfaction
+- Gradual recovery through 2010: Scores slowly climb back up to around 5.5 by 2010
+- Relative stability with slight fluctuations: From 2010 onwards, global life satisfaction remains fairly stable, hovering between 5.3-5.5 with minor ups and downs
+- Recent uptick: There appears to be a slight upward trend from 2016-2018
+
+Insights: 
+- The 2005-2006 period likely captures a major global crisis or event (possibly related to economic conditions, conflicts, or other global disruptions)
+- Global happiness/life satisfaction has remained relatively flat for the past decade, suggesting systemic challenges in improving worldwide well-being
+- The global average (5.3-5.5) is notably lower than the top 10 countries shown in your first plot (7.4-7.6), highlighting the significant gap between the happiest nations and the world average
+
+```{r}
+# average Life ladder per Year
+avg.year <- aggregate(df$Life.Ladder ~ 
+                        df$Year, 
+                      data=df, 
+                      FUN=mean)
+
+library(dplyr)
+c1 <- count(df,Year)
+
+plot(c1[,1], avg.year[,2],
+     xlab="Year",
+     ylab = "Average Life Ladder", 
+     main='Average Life Ladder per Year',
+     type = 'b',
+     pch=19,
+     col='purple'
+     )
+
+```
+
+### 1.2.4 Freedom vs Life Ladder
+- We can see a correlation between the `Life Ladder` and `Freedom` to make life choices. The greater the ranking of `Freedom` to make life choices, the higher the `Life Ladder` was, presenting a steady increase and positive correlation.
+
+- Clear positive correlation: The red trend line shows that as "Freedom to make life choices" increases, Life Ladder scores consistently rise. This suggests freedom is a crucial component of human well-being.
+- Strong but not perfect relationship: While the correlation is evident, there's considerable scatter around the trend line, indicating that freedom alone doesn't determine life satisfaction - other factors matter too.
+- Range of experiences: 
+  +) Freedom scores range from about 0.3 to 1.0
+  +) Life Ladder scores span roughly 3.0 to 8.0
+  +) This wide range captures diverse political, economic, and social contexts globally
+- Clustering patterns: There appears to be denser clustering in the middle-to-upper ranges (freedom 0.6-0.9, life satisfaction 5.0-7.0), suggesting most observations fall within these moderate-to-high ranges.
+
+```{r}
+plot(Life.Ladder~Freedom.to.make.life.choices, 
+     data = df,
+     main='Freedom vs Life Ladder')
+
+FvLL.m <- lm(Life.Ladder ~ Freedom.to.make.life.choices, data = df)
+
+abline(FvLL.m, col = "red", lwd = 2)
+
+```
+
+# 2. Data Processing 
+
+## 2.1 Remove Irrelevant Features
+- Simplify the feature matrix, speed up processing and avoid errors when performing arithmetic and regression operations
+- Keep the dataset “neat” before going into the steps of handling missing values, encoding, scaling.
+
+### 2.1.1 Drop Country Name and Year column
+- Reduce noise in the model when columns like `Country.name`, `Year` are not direct predictors.
+
+```{r}
+columns_to_drop <- c(
+  'Country.name',
+  'Year'
+)
+
+df <- df %>% select(-all_of(columns_to_drop))
+
+df
+
+```
+
+
+- After remove irrelevant features we are going to quick check the column names of the dataset
+```{r}
+colnames(df)
+```
+
+### 2.1.2 Check null values percentage
+- Use loop and is.na method in R to check all missing values and output the result in percentage: 
+
+```{r}
+na_percentage <- function(df) {
+  missing_percentage <- list()
+  total <- nrow(df)
+  
+  for (col in names(df)) {
+    missing_value <- sum(is.na(df[[col]]))
+    percentage <- (missing_value * 100) / total
+    if (percentage > 0) {
+      missing_percentage[[col]] <- percentage
+    }
+  }
+  
+  return(missing_percentage)
+}
+
+# Usage (equivalent to your Python code)
+na_list <- na_percentage(df)
+print(na_list)
+
+
+```
+- We computed the missing‐value percentage for each feature. Core socioeconomic predictors exhibited <2% missin valuess and were imputed via median values; moderate‐missing variables (4–10%) were imputed by KNN; features with >50% missing entries (e.g., long‐range trust surveys, raw GINI index) were excluded from the model.
+- Specifically:
+  +) Core predictors (GDP, Social support, Health, Freedom, Affect): 0.8 – 1.7% meaning that very low then we can impute in safe
+  +) Generosity: 4.8%, low-moderate, we can consider impute or use KNN imputation technique
+  +) Corruption: 5.6%, low-moderate, consider whether missing is informative
+  +) Government trust / Quality: 8.5 – 10.2%, moderate, we can impute carefully or drop if not central
+  +) GINI indices: 11.8 – 62.3%, high–very high, we decide to drop these variables
+  +) Trust surveys (WVS, Gallup): 60 – 93%, too sparse, drop these variables from modeling
+
+### 2.1.3 Drop columns with high null values percentage
+
+```{r}
+columns_to_drop <- c(
+  'Standard.deviation.of.ladder.by.country.year',
+  'Standard.deviation.Mean.of.ladder.by.country.year',
+  'GINI.index..World.Bank.estimate.',
+  'GINI.index..World.Bank.estimate...average.2000.16',
+  'gini.of.household.income.reported.in.Gallup..by.wp5.year',
+  'Most.people.can.be.trusted..Gallup',
+  'Most.people.can.be.trusted..WVS.round.1981.1984',
+  'Most.people.can.be.trusted..WVS.round.1989.1993',
+  'Most.people.can.be.trusted..WVS.round.1994.1998',
+  'Most.people.can.be.trusted..WVS.round.1999.2004',
+  'Most.people.can.be.trusted..WVS.round.2005.2009',
+  'Most.people.can.be.trusted..WVS.round.2010.2014'
+)
+
+# Drop the columns
+df_cleaned <- df %>% select(-all_of(columns_to_drop))
+
+df_cleaned
+
+```
+- We removed features exhibiting excessive missingness (>50%), including various GINI measures and historical trust surveys, as their imputation would introduce undue uncertainty. This left us with core economic and social variables having <10% missingness
+- After this processing we will have the dataset with less dimensions (from 26 variables to 12–15 robust predictors) that mean we will focus on well-populated features to avoid bias risk and speeds up convergence in regularized models (e.g. LASSO).
+
+### 2.1.4 Correlation Matrix
+- We are going to calculate the Pearson coefficient between every pair of variables, ignoring rows with NA, and convert square matrix into 3 column table (Var1, Var2, value) to use ggplot.
+- We also set the color scale: negative (blue), neutral (white), positive (red) and draw the correlation figure with values rounded to 2 digits in each cell.
+
+```{r}
+num_col <- df_cleaned %>% select(where(is.numeric))
+corr_matrix <- cor(num_col, use = "complete.obs")
+
+corr_melted <- melt(corr_matrix)
+
+p <- ggplot(corr_melted, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), 
+            size = 15, 
+            color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 30, color = "white"),  # X-axis labels
+    axis.text.y = element_text(size = 30, color = "white"),                        # Y-axis labels
+    plot.title = element_text(hjust = 0.5, size = 20),           # Title
+    legend.title = element_text(size = 30, color = "white"),                      # Legend title
+    legend.text = element_text(size = 20, color = "white")) +
+  labs(title = "Correlation Matrix", x = "", y = "") +
+  coord_fixed()
+
+
+ggsave("correlation_matrix.png", plot = p, width = 30, height = 30, dpi = 300)
+
+print(p)
+
+```
+- Key insights:
+  +) GDP and Life Ladder (r≈0.78), Social Support and Life Ladder (r≈0.70), Health ↔ Life Ladder (r≈0.75): confirming that economic and health investment are direct drivers.
+  +) Freedom and Life Ladder (r≈0.53): plays a strong third role.
+  +) Generosity and Life Ladder (r≈0.23): low correlation, suggesting further analysis of the mediating mechanism.
+  +) GDP and Social support (r≈0.68), GDP and Health (r≈0.85): signs of multicollinearity to watch out for our processing in general
+
+### 2.1.5 Drop column with low correlation
+- We decided to remove the variable Confidence in national government with applied criterion |corr| < 0.1 because its correlation coefficient with the target variable Life Ladder is close to 0, meaning that it will not help improve the predictive ability in the linear regression model. This helps reduce complexity and avoid introducing additional noise into the model.
+- Specifically the variable Confidence in national government with |r| ≈ 0.09 was eliminated
+
+```{r}
+# As we can observe the correlation between Confidence in national government and Life Ladder is quite low so we will consider to drop this feature
+## Drop
+columns_to_drop <- c(
+  'Confidence.in.national.government'
+)
+
+# Drop the columns
+df_cleaned <- df_cleaned %>% select(-all_of(columns_to_drop))
+
+df_cleaned
+```
+
+## 2.2 Handle Missing data
+### 2.2.1 Check missing data percentage
+```{r}
+na_list <- na_percentage(df_cleaned)
+print(na_list)
+```
+- Missing rates for most socio-economic background variables are very low (<2%).
+- Some variables have moderate missingness (4–6%): `Generosity`, `Perceptions.of.corruption.`
+- Two governance quality variables (`Democratic.Quality`, `Delivery.Quality`) have missingness of ~8.5% still within the acceptable threshold for retention.
+
+### 2.2.2 Handle missing values
+
+```{r}
+n_before <- nrow(df_cleaned)
+df_cleaned <- df_cleaned %>% drop_na()
+n_after  <- nrow(df_cleaned)
+message("Dropped ", n_before - n_after, " rows (", round((n_before-n_after)/n_before*100,1), "%).")
+```
+
+- We removed all remaining rows containing any NA values (drop_na()). This resulted in dropping 311 rows (18.3% of data).
+- Although drop_na() ensures a complete-case dataset with no missing, we acknowledge potential sample bias; in future work, more nuanced imputation could preserve more data.
+
+
+## 2.3 Duplicate data
+
+```{r}
+df %>%
+  group_by_all() %>%
+  filter(n()>1) %>%
+  ungroup()
+```
+- There is no duplicate data that mean we verified there are no fully duplicated rows in the final dataset via grouping and filter(n()>1), confirming each country–year appears only once.
+
+## 2.4 Detect Outliers
+- We examined on IQR technique and only handle numeric variables, ignore NA before calculation. Resulting in the `results` variable will show lists the number and percentage (%) of outliers for each variable.
+- IQR method: use the interval Q1–Q3, expand by 1.5×IQR, all points outside that interval are marked as outliers. 
+  +) Benefit: IQR is robust with mild outliers, not affected by non-normal distributions.
+  +) Limitation: only detects linear outliers according to IQR, not nonlinear trend or group outliers.
+- At the end of this process we just want to detect outliers but not completely removed or handle them due maintain the pattern.
+
+```{r}
+detect_outliers_iqr <- function(df, multiplier = 1.5) {
+  # Get numeric columns only
+  numeric_cols <- sapply(df, is.numeric)
+  df_numeric <- df[, numeric_cols, drop = FALSE]
+  
+  # Create summary dataframe
+  results <- data.frame(
+    Column = names(df_numeric),
+    Outliers = NA,
+    Percentage = NA,
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:ncol(df_numeric)) {
+    col_name <- names(df_numeric)[i]
+    x <- df_numeric[[i]]
+    x <- x[!is.na(x)]  # Remove NAs
+    
+    if (length(x) > 0) {
+      # Calculate IQR bounds
+      Q1 <- quantile(x, 0.25)
+      Q3 <- quantile(x, 0.75)
+      IQR <- Q3 - Q1
+      lower <- Q1 - multiplier * IQR
+      upper <- Q3 + multiplier * IQR
+      
+      # Count outliers
+      outliers <- sum(x < lower | x > upper)
+      percentage <- round((outliers / length(x)) * 100, 1)
+      
+      results$Outliers[i] <- outliers
+      results$Percentage[i] <- percentage
+    }
+  }
+  
+  return(results)
+}
+
+outliers <- detect_outliers_iqr(df_cleaned)
+
+```
+
+
+```{r}
+outliers
+```
+- Key insights:
+  +) `Perceptions.of.corruption` has ~9.3% outliers: a sign that corruption data is widely distributed, with many countries being rated very high or very low.
+  +) `Social.support`, `Generosity`, `Negative.affect` also have ~1–2% outliers, equivalent to a few dozen observations. It is worth checking which countries/years these points come from (e.g. crisis, survey change).
+  +) `Life.Ladder`, `GDP`, `Positive.affect`, `Democratic.Quality`, `Delivery.Quality` have no outliers, suggesting that the original data is quite clean for key variables.
+
+## 2.5 Add one more column for the classification problem
+- At this section, we are going to binning `Life.Ladder` into three levels sets up a clear classification problem: predicting “Low/Medium/High Happiness” from socio-economic predictors.
+- Based on the `Life.Ladder` distribution (min ≈2.7, max ≈7.8), 4 and 6 are close to mean nearly 1, dividing the dataset into relatively balanced groups. We chose 4 and 6 because those are close to the mean ± standard deviation of `Life.Ladder`, creating three groups of similar size.
+
+```{r}
+df_cleaned$Happiness.Level <- cut(df_cleaned$Life.Ladder,
+                                     breaks = c(2, 4, 6, 9),
+                                     labels = c("Low Happiness", "Medium Happiness", "High Happiness"),
+                                     right = FALSE)
+
+df_cleaned
+```
+- This step is enable for us to convert to a classification opens up the possibility of applying algorithms such as decision tree, random forest to predict happiness.
+
+### Plot the Happiness Level(optional)
+
+```{r}
+table(df_cleaned$Happiness.Level)
+prop.table(table(df_cleaned$Happiness.Level))
+```
+
+- Low Happiness (~0.1%), Medium Happiness (0.59%), High Happiness (0.31%)
+- These information are showing this variable is imbalanced, we can consider to stratified sampling or class weights or use other techniques to handle if it necessary.
+
+```{r}
+create_corruption_boxplot <- function(df) {
+  ggplot(df, aes(y = Perceptions.of.corruption)) +
+    geom_boxplot(fill = "lightcoral", alpha = 0.7, outlier.color = "red", outlier.size = 2) +
+    labs(
+      title = "Boxplot: Perceptions of Corruption",
+      y = "Perceptions of Corruption",
+      x = ""
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+      axis.text.y = element_text(size = 12),
+      axis.title.y = element_text(size = 14)
+    )
+}
+
+create_corruption_boxplot(df_cleaned)
+
+```
+
+- This result highlight that the distribution and outliers of the variable `Perceptions.of.corruption`—one of the key identified drivers.
+  +) The red points are concentrated near 0, indicating that many country–years have an index of ~0 (i.e. very high perceived corruption).
+  +) The pink box ranges from ~0.72 to ~0.85, showing that 50% of the observations fall in the high range, meaning that the majority of countries have low corruption scores.
+  +) Whiskers pull up close to 1.0, illustrating some extremely “integrity” countries.
+  +) Red outliers below 0.5, centered around 0, indicate the “very corrupt” group.
+- Key insights:
+  +) Asymmetry: Most of the data is concentrated on the “less corrupt” side, but highly corrupt outliers have a small but large impact on global happiness.
+  +) Low corruption observations (near 0) tend to fall into the ‘Low Happiness’ group—this helps the model distinguish between classes better.
+
+# 3. Training Model
+## 3.1 Split data
+
+Splitting dataset twice:
+  - First time for training - validation set, and test set
+  - Second time, spliting the big dataset (training - validation) into seperate sets
+The training and validation sets are used for model development while the test set is used for measure model performance
+```{r}
+set.seed(123)
+### First split
+# 90% train_val, 10% test_labeled
+sample_size <- floor(0.9 * nrow(df_cleaned))
+
+train_val_indices <- sample(nrow(df_cleaned), sample_size)
+
+# Split the data
+train_val_data <- df_cleaned[train_val_indices, ]
+test_labeled_data <- df_cleaned[-train_val_indices, ]
+
+### Second split
+# 80% train, 20% val
+sample_size <- floor(0.8 * nrow(train_val_data))
+
+train_indices <- sample(nrow(train_val_data), sample_size)
+
+# Split the data into train and val dataset
+train_data <- train_val_data[train_indices, ]
+val_data <- train_val_data[-train_indices, ]
+
+```
+
+
+## 3.2 Cross Validation
+### 3.2.1 Regression Model
+
+Data preparation for Building the regression model (eliminate the 'Happiness.Level' feature)
+```{r}
+library(glmnet)
+set.seed(123)
+## Assign X_train and y_train
+X_train.regression <- model.matrix(Life.Ladder ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=train_data)[, -1]
+y_train.regression <- train_data$Life.Ladder
+
+
+## Assign X_val and y_val
+X_val.regression <- model.matrix(Life.Ladder ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=val_data)[, -1]
+y_val.regression <- val_data$Life.Ladder
+
+```
+
+
+#### 3.2.1.1 Scale
+
+Features scaling which is important for model using distance-based metric (KNN) for classification task
+```{r}
+preproc <- preProcess(X_train.regression, method = c("center", "scale"))
+
+X_train.regression <- predict(preproc, X_train.regression)
+
+X_val.regression <- predict(preproc, X_val.regression)
+```
+
+
+#### 3.2.1.2 Ridge
+
+Regression model using Ridge in cross validation method to find best lambda
+```{r}
+# Calculate cross-validation to find lambda
+cv_ridge.regression <- cv.glmnet(X_train.regression, y_train.regression, alpha = 0, nfolds = 5)
+
+plot(cv_ridge.regression, ylab="Mean-Squared Error", main = "Ridge Regression Cross-Validation")
+
+# Get optimal lambda
+lambda_ridge_min.regression <- cv_ridge.regression$lambda.min
+
+cat("Ridge Regression Results:\n")
+cat("Lambda min (lowest CV error):", lambda_ridge_min.regression, "\n")
+```
+
+#### Fit model with optimal lambda for Ridge
+
+Refit with best lambda
+```{r}
+ridge_model.regression <- glmnet(X_train.regression, y_train.regression, alpha = 0, lambda = lambda_ridge_min.regression)
+
+ridge_coefs.regression <- coef(ridge_model.regression)
+cat("\nRidge Regression Coefficients (lambda.min):\n")
+print(ridge_coefs.regression)
+
+```
+
+
+
+#### 3.2.1.3 Lasso
+
+Regression model using Lasso in cross validation method to find best lambda
+```{r}
+# Calculate cross-validation to find lambda
+cv_lasso.regression <- cv.glmnet(X_train.regression, y_train.regression, alpha = 1, nfolds = 5)
+
+plot(cv_lasso.regression, main = "Lasso Regression Cross-Validation")
+
+# Get optimal lambda
+lambda_lasso_min.regression <- cv_lasso.regression$lambda.min
+
+cat("Lambda min (lowest CV error):", lambda_lasso_min.regression, "\n")
+```
+
+#### Fit model with optimal lambda for Lasso
+
+Refit Lasso Regression with best lambda
+```{r}
+lasso_model.regression <- glmnet(X_train.regression, y_train.regression, alpha = 1, lambda = lambda_lasso_min.regression)
+
+lasso_coefs.regression <- coef(lasso_model.regression)
+cat("\nLasso Regression Coefficients (lambda.min):\n")
+print(lasso_coefs.regression)
+```
+
+
+
+### 3.2.2 Classification Model
+
+Data preparation for building the classification model
+```{r}
+library(class)     # for knn()
+library(caret)     
+
+## Assign X_train and y_train
+set.seed(123)
+X_train.classification <- model.matrix(Happiness.Level ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=train_data)[, -1]
+y_train.classification <- train_data$Happiness.Level
+
+## Assign X_val and y_val
+X_val.classification <- model.matrix(Happiness.Level ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=val_data)[, -1]
+y_val.classification <- val_data$Happiness.Level
+
+
+# Scale features (important for KNN)
+preproc <- preProcess(X_train.classification, method = c("center", "scale"))
+X_train.classification <- predict(preproc, X_train.classification)
+X_val.classification <- predict(preproc, X_val.classification)
+
+
+
+```
+
+
+#### 3.2.2.1 Ridge
+
+Cross validation combined with Ridge 
+```{r}
+# Calculate cross-validation to find lambda
+cv_ridge.classification <- cv.glmnet(X_train.classification, y_train.classification, alpha = 0, family = "multinomial")
+
+## Ridge
+plot(cv_ridge.classification, ylab="Mean-Squared Error", main = "Ridge Classification Cross-Validation")
+
+# Get optimal lambda
+lambda_ridge_min.classification <- cv_ridge.classification$lambda.min
+
+cat("Ridge Classification Results:\n")
+cat("Lambda min (lowest CV error):", lambda_ridge_min.classification, "\n")
+```
+
+
+#### Fit model with optimal lambda
+
+Refit model with best lambda
+```{r}
+ridge_model.classification <- glmnet(X_train.classification, y_train.classification, alpha = 0, lambda = lambda_ridge_min.classification, family = "multinomial")
+
+ridge_coefs.classification <- coef(ridge_model.classification)
+cat("\nRidge Classification Coefficients (lambda.min):\n")
+print(ridge_coefs.classification)
+
+```
+Comment: 
+  -High GDP, good health, social support, and positive feelings reduce likelihood of low happiness
+  -Medium happiness: some indicators like corruption slightly push people into it
+  -This class is strongly and positively driven by well-being metrics: GDP, social support, health, and emotional positivity
+
+#### 3.2.2.2 Lasso
+```{r}
+# Calculate cross-validation to find lambda
+cv_lasso.classification <- cv.glmnet(X_train.classification, y_train.classification, alpha = 1, family = "multinomial")
+
+# Lasso
+plot(cv_lasso.classification, main = "Lasso Classification Cross-Validation")
+
+# Get optimal lambda
+lambda_lasso_min.classification <- cv_lasso.classification$lambda.min
+
+cat("Lambda min (lowest CV error):", lambda_lasso_min.classification, "\n")
+```
+
+#### Fit model with optimal lambda
+```{r}
+lasso_model.classification <- glmnet(X_train.classification, y_train.classification, alpha = 1, lambda = lambda_lasso_min.classification, family = "multinomial")
+
+lasso_coefs.classification <- coef(lasso_model.classification)
+cat("\nLasso Classification Coefficients (lambda.min):\n")
+print(lasso_coefs.classification)
+```
+
+Comment:
+  - Lasso tells us which predictors really matter — and GDP, social support, life expectancy, and positive affect are dominant for high happiness. 
+  - Medium happiness remains the most ambiguous class — few strong predictors.
+  - Features like Generosity, Negative affect, and Delivery Quality were not useful under Lasso 
+
+## 3.3 Training model
+### 3.3.1 Regression model
+#### 3.3.1.1 Linear Regression
+
+Developing Linear Regression model on training set and observing the performance on validation set
+```{r}
+X_train_with_intercept <- cbind(Intercept = 1, X_train.regression)
+X_val_with_intercept   <- cbind(Intercept = 1, X_val.regression)
+
+# Step 2: Fit linear regression using low-level lm.fit()
+lm_model <- lm.fit(x = X_train_with_intercept, y = y_train.regression)
+
+# Step 3: Predict on validation set
+y_pred <- as.vector(X_val_with_intercept %*% lm_model$coefficients)
+
+
+# Calculate MSE, RMSE, R-squared
+lm_mse <- mean((y_pred - y_val.regression)^2)
+lm_rmse <- sqrt(lm_mse)
+lm_r2 <- cor(y_val.regression, y_pred)^2
+cat("Linear Regression: \n")
+cat("MSE: ", lm_mse, "\nRMSE: ", lm_rmse, "\nR-squared: ", lm_r2, "\n")
+
+```
+
+#### 3.3.1.2 RandomForest Regression
+
+Likewise with RandomForest Regression
+```{r}
+library(randomForest)
+# Fit the model
+set.seed(123)
+
+rf_model <- randomForest(x = X_train.regression,
+                         y = y_train.regression,
+                         ntree = 500,          
+                         mtry = 3,             
+                         importance = TRUE)
+
+# Predict
+rf_pred <- predict(rf_model, newdata = X_val.regression)
+
+# Calculate MSE, RMSE, R-squared
+rf_mse <- mean((rf_pred - y_val.regression)^2)
+rf_rmse <- sqrt(rf_mse)
+rf_r2 <- cor(y_val.regression, rf_pred)^2
+cat("Random Forest:", "\n")
+
+cat("MSE: ", rf_mse, "\nRMSE: ", rf_rmse, "\nR-squared: ", rf_r2, "\n")
+```
+
+```{r}
+# View variable importance
+importance(rf_model)
+varImpPlot(rf_model)
+```
+- %IncMSE: improving prediction accuracy, IncNodePurity: structural importance within the forest
+- Positive.affect is the most critical predictor in terms of prediction accuracy. It likely captures personal well-being and mood, which ties strongly to happiness levels.
+- Healthy.life.expectancy.at.birth is the most used variable in splitting decisions to reduce prediction error.
+
+
+### 3.3.2 Classification model - KNN
+```{r}
+set.seed(123)
+knn_pred <- knn(train = X_train.classification,
+                test = X_val.classification,
+                cl = y_train.classification,
+                k = 5)
+
+
+# Evaluate
+conf_mat <- confusionMatrix(knn_pred, y_val.classification)
+print(conf_mat)
+
+```
+
+
+```{r}
+table(knn_pred)
+table(y_val.classification)
+```
+
+
+
+## 3.4 Training model with test_labeled dataset
+
+### 3.4.1 Regression model
+
+Likewise, Data preparation for model predicting on the test set
+```{r}
+## Assign X_train_val and y_train_val
+X_train_val.regression <- model.matrix(Life.Ladder ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=train_val_data)[, -1]
+y_train_val.regression <- train_val_data$Life.Ladder
+
+## Assign X_test_labeled and y_test_labeled
+X_test_labeled.regression <- model.matrix(Life.Ladder ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=test_labeled_data)[, -1]
+y_test_labeled.regression <- test_labeled_data$Life.Ladder
+
+### Scale data
+X_train_val.regression <- predict(preproc, X_train_val.regression)
+X_test_labeled.regression <- predict(preproc, X_test_labeled.regression)
+
+```
+
+#### 3.4.1.1 Linear Regression
+
+Fitting Linear model on train-val dataset and final prediction on the test dataset
+```{r}
+X_train_val_w_intercept <- cbind(Intercept = 1, X_train_val.regression)
+X_test_labeled_w_intercept   <- cbind(Intercept = 1, X_test_labeled.regression)
+
+# Step 2: Fit linear regression using low-level lm.fit()
+lm_model <- lm.fit(x = X_train_val_w_intercept, y = y_train_val.regression)
+
+# Step 3: Predict on validation set
+final_y_pred <- as.vector(X_test_labeled_w_intercept %*% lm_model$coefficients)
+
+
+# Calculate MSE, RMSE, R-squared
+final_lm_mse <- mean((final_y_pred - y_test_labeled.regression)^2)
+final_lm_rmse <- sqrt(final_lm_mse)
+final_lm_r2 <- cor(y_test_labeled.regression, final_y_pred)^2
+cat("Linear Regression: \n")
+cat("MSE: ", final_lm_mse, "\nRMSE: ", final_lm_rmse, "\nR-squared: ", final_lm_r2, "\n")
+```
+
+
+#### 3.4.1.2 Random Forest
+
+Similarly, the RandomForest is built on the train-validation set, then predicting on the test set
+```{r}
+# Fit the model
+set.seed(123)
+
+final_rf_model <- randomForest(x = X_train_val.regression,
+                         y = y_train_val.regression,
+                         ntree = 500,          
+                         mtry = 3,             
+                         importance = TRUE)
+
+# Predict
+final_rf_pred <- predict(final_rf_model, newdata = X_test_labeled.regression)
+
+# Calculate MSE, RMSE, R-squared
+final_rf_mse <- mean((final_rf_pred - y_test_labeled.regression)^2)
+final_rf_rmse <- sqrt(final_rf_mse)
+final_rf_r2 <- cor(y_test_labeled.regression, final_rf_pred)^2
+cat("Random Forest:", "\n")
+
+cat("MSE: ", final_rf_mse, "\nRMSE: ", final_rf_rmse, "\nR-squared: ", final_rf_r2, "\n")
+```
+
+```{r}
+# View variable importance
+importance(final_rf_model)
+varImpPlot(final_rf_model)
+```
+
+### 3.4.2 Classification
+
+The same workflow with building the classification model (using KNN) but with additional step for scaling the data
+```{r}
+## Assign X_train_val and y_train_val
+X_train_val.classification <- model.matrix(Happiness.Level ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=train_val_data)[, -1]
+y_train_val.classification <- train_val_data$Happiness.Level
+
+
+## Assign X_test_labeled and y_test_labeled
+X_test_labeled.classification <- model.matrix(Happiness.Level ~ Log.GDP.per.capita + Social.support + Healthy.life.expectancy.at.birth + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption + Positive.affect + Negative.affect + Democratic.Quality + Delivery.Quality, data=test_labeled_data)[, -1]
+y_test_labeled.classification <- test_labeled_data$Happiness.Level
+
+
+# Scaling
+X_train_val.classification <- predict(preproc, X_train_val.classification)
+X_test_labeled.classification <- predict(preproc, X_test_labeled.classification)
+
+```
+
+Predicting the KNN model on the test set
+```{r}
+set.seed(123)
+result_knn_pred <- knn(train = X_train_val.classification,
+                test = X_test_labeled.classification,
+                cl = y_train_val.classification,
+                k = 5)
+
+# Evaluate
+result_conf_mat.classification <- confusionMatrix(result_knn_pred, y_test_labeled.classification)
+print(result_conf_mat.classification)
+
+```
+
+
+### 3.4.3 Model interpretation
+  - Despite the score of those models on the test set (MSE, RMSE, R-squared in regression task; accuracy, sensitivity, Specificity, Pos Pred Value, Balance accuracy in classification Low Happiness class) are slightly lower than on the scores of validation set (E.g: classification: Accuracy 0.84 on validation, 0.79 on test; Random Forest in regression: R-squared: 0.89 validate, 0.88 on test), but this slight difference showed our models were reduced the overfitting risk.
+  - The prediction on the test set in Regression task, the Linear regression model performed R-squared ~ 0.78 with other metrics quite decent but those metrics all were outperformed by RandomForest with R-squared ~ 0.88.
+  - The prediction on the test set in Classification, we just use the KNN model for the task. The 'Medium Happiness Class' predicting quite good in overall, this might be due to the dominance of this class on distribution of 'Happiness.Level'.
+  
+  
+
+
+# DISCUSSION
+
+
+# CONCLUSION
+
+
+# REFERENCE
+
