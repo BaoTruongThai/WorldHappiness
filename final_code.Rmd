@@ -1,6 +1,5 @@
 ---
 title: "National Happiness Level under Data Science perspective"
-author: "Nguyen 22317009 - Coffee 21886207 - Thai - Sophie - Sarad"
 date: "`r Sys.Date()`"
 output:
   word_document: default
